@@ -2,11 +2,51 @@
 
 English | [中文](README_CN.md) | [日本語](README_JA.md)
 
+> [!IMPORTANT]
+> This repository is an **unofficial derivative fork** of the original [router-for-me/CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) project. The original project, core implementation, and upstream development are credited to its maintainers and contributors. Grok Free-specific changes and the GHCR image documented here are maintained by this fork and are not endorsed or supported by the upstream project.
+
 A proxy server that provides OpenAI/Gemini/Claude/Codex/Grok compatible API interfaces for CLI.
 
 It now also supports OpenAI Codex (GPT models) and Claude Code via OAuth.
 
 So you can use local or multi-account CLI access with OpenAI(include Responses)/Gemini/Claude-compatible clients and SDKs.
+
+## Unofficial Grok Free Fork
+
+This fork builds on the original [router-for-me/CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) and adds Grok CLI Free OAuth defaults, per-account Grok Free quota tracking, and a management-panel quota view. For upstream features, architecture, and general usage, credit and project history belong to the original repository.
+
+### Docker quick start
+
+The published image currently supports `linux/amd64`.
+
+```bash
+git clone https://github.com/fenghuaxueyue64/CLIProxyAPI.git
+cd CLIProxyAPI
+cp config.example.yaml config.yaml
+mkdir -p auths logs
+docker compose up -d
+```
+
+On PowerShell, use `Copy-Item config.example.yaml config.yaml` and `New-Item -ItemType Directory -Force auths, logs` for the file preparation steps.
+
+Before exposing the service, edit `config.yaml` and replace the example `api-keys`. To use the management panel, also set `remote-management.secret-key`; keep `remote-management.allow-remote` disabled unless remote administration is required.
+
+Log in to xAI from the running container:
+
+```bash
+docker exec -it cli-proxy-api ./CLIProxyAPI --config /CLIProxyAPI/config.yaml --xai-login --no-browser
+```
+
+Open the printed authorization URL in your browser. The xAI callback uses `127.0.0.1:56121`, which is published by the included Compose file. After login, credentials persist in `./auths`. The API and management panel are available at `http://127.0.0.1:8317` and `http://127.0.0.1:8317/management.html`.
+
+Update this fork's image with:
+
+```bash
+docker compose pull
+docker compose up -d
+```
+
+The Compose deployment uses `ghcr.io/fenghuaxueyue64/cli-proxy-api:grok-free` by default and persists `config.yaml`, `auths/`, and `logs/`. This image contains fork-specific modifications; the original [router-for-me/CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) maintainers are not responsible for this image or its support.
 
 ## Sponsor
 
@@ -247,4 +287,4 @@ This is a tool built with Tauri 2 + Vue 3 for managing multiple OpenAI Codex des
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+The original [router-for-me/CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) project and this derivative are distributed under the MIT License. The upstream copyright and permission notices are retained in [LICENSE](LICENSE).

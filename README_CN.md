@@ -2,11 +2,51 @@
 
 [English](README.md) | 中文 | [日本語](README_JA.md)
 
+> [!IMPORTANT]
+> 本仓库是原项目 [router-for-me/CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) 的**非官方衍生分支**。原项目、核心实现及上游开发成果归功于原仓库的维护者和贡献者。本仓库中的 Grok Free 专属修改及 GHCR 镜像由本分支维护，不代表原项目官方发布，也不由原项目提供支持。
+
 一个为 CLI 提供 OpenAI/Gemini/Claude/Codex/Grok 兼容 API 接口的代理服务器。
 
 现已支持通过 OAuth 登录接入 OpenAI Codex（GPT 系列）和 Claude Code。
 
 您可以使用本地或多账户的CLI方式，通过任何与 OpenAI（包括Responses）/Gemini/Claude 兼容的客户端和SDK进行访问。
+
+## 非官方 Grok Free 衍生分支
+
+本分支基于原项目 [router-for-me/CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) 开发，增加了 Grok CLI Free OAuth 默认路径、按账号统计 Grok Free 额度，以及管理面板额度页面。上游通用功能、架构和项目历史均应归功于原仓库。
+
+### Docker 快速部署
+
+当前发布的镜像支持 `linux/amd64`。
+
+```bash
+git clone https://github.com/fenghuaxueyue64/CLIProxyAPI.git
+cd CLIProxyAPI
+cp config.example.yaml config.yaml
+mkdir -p auths logs
+docker compose up -d
+```
+
+PowerShell 用户可将文件准备步骤替换为 `Copy-Item config.example.yaml config.yaml` 和 `New-Item -ItemType Directory -Force auths, logs`。
+
+对外提供服务前，请编辑 `config.yaml` 并替换示例 `api-keys`。如需使用管理面板，还要设置 `remote-management.secret-key`；除非确实需要远程管理，否则请保持 `remote-management.allow-remote` 为关闭状态。
+
+在运行中的容器内登录 xAI：
+
+```bash
+docker exec -it cli-proxy-api ./CLIProxyAPI --config /CLIProxyAPI/config.yaml --xai-login --no-browser
+```
+
+在浏览器中打开命令输出的授权地址。xAI 回调使用 `127.0.0.1:56121`，随附的 Compose 文件已发布该端口。登录后的凭据会持久化到 `./auths`。API 和管理面板地址分别为 `http://127.0.0.1:8317` 与 `http://127.0.0.1:8317/management.html`。
+
+更新本分支镜像：
+
+```bash
+docker compose pull
+docker compose up -d
+```
+
+Compose 默认使用 `ghcr.io/fenghuaxueyue64/cli-proxy-api:grok-free`，并持久化 `config.yaml`、`auths/` 和 `logs/`。该镜像包含本分支的专属修改；原项目 [router-for-me/CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) 的维护者不负责该镜像及其技术支持。
 
 ## 赞助商
 
@@ -245,7 +285,7 @@ OmniRoute 是一个面向多供应商大语言模型的 AI 网关：它提供兼
 
 ## 许可证
 
-此项目根据 MIT 许可证授权 - 有关详细信息，请参阅 [LICENSE](LICENSE) 文件。
+原项目 [router-for-me/CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) 及本衍生版本均按 MIT 许可证分发，上游版权与许可声明已完整保留在 [LICENSE](LICENSE) 中。
 
 ## 写给所有中国网友的
 
