@@ -21,6 +21,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/xaiusage"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
@@ -140,7 +141,7 @@ func (e *XAIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req 
 	if err != nil {
 		return resp, err
 	}
-	applyXAIHeaders(httpReq, auth, token, true, prepared.sessionID)
+	applyXAIHeaders(httpReq, auth, token, true, prepared.sessionID, prepared.baseModel)
 	e.recordXAIRequest(ctx, auth, url, httpReq.Header.Clone(), prepared.body)
 
 	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
@@ -156,6 +157,7 @@ func (e *XAIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req 
 		}
 	}()
 	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+	e.recordXAIUsage(auth, prepared.baseModel, httpResp.Header, xaiusage.Usage{})
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		data, errRead := io.ReadAll(httpResp.Body)
 		if errRead != nil {
@@ -187,6 +189,7 @@ func (e *XAIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req 
 		case "response.completed":
 			if detail, ok := helps.ParseCodexUsage(eventData); ok {
 				reporter.Publish(ctx, detail)
+				e.recordXAIUsage(auth, prepared.baseModel, nil, xaiusage.Usage{Input: detail.InputTokens, Output: detail.OutputTokens, Total: detail.InputTokens + detail.OutputTokens})
 			}
 			completedData := xaiPatchCompletedOutput(eventData, outputItemsByIndex, outputItemsFallback)
 			completedData = xaiNormalizeReasoningSummaryData(completedData)
@@ -234,7 +237,7 @@ func (e *XAIExecutor) executeCompactRequest(ctx context.Context, auth *cliproxya
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	applyXAIHeaders(httpReq, auth, token, false, prepared.sessionID)
+	applyXAIHeaders(httpReq, auth, token, false, prepared.sessionID, prepared.baseModel)
 	e.recordXAIRequest(ctx, auth, requestURL, httpReq.Header.Clone(), prepared.body)
 
 	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
@@ -250,6 +253,7 @@ func (e *XAIExecutor) executeCompactRequest(ctx context.Context, auth *cliproxya
 		}
 	}()
 	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+	e.recordXAIUsage(auth, prepared.baseModel, httpResp.Header, xaiusage.Usage{})
 
 	data, err := io.ReadAll(httpResp.Body)
 	if err != nil {
@@ -264,7 +268,13 @@ func (e *XAIExecutor) executeCompactRequest(ctx context.Context, auth *cliproxya
 		return nil, nil, nil, err
 	}
 
-	reporter.Publish(ctx, helps.ParseOpenAIUsage(data))
+	detail := helps.ParseOpenAIUsage(data)
+	reporter.Publish(ctx, detail)
+	e.recordXAIUsage(auth, prepared.baseModel, nil, xaiusage.Usage{
+		Input:  detail.InputTokens,
+		Output: detail.OutputTokens,
+		Total:  detail.TotalTokens,
+	})
 	reporter.EnsurePublished(ctx)
 	return prepared, data, httpResp.Header.Clone(), nil
 }
@@ -475,7 +485,7 @@ func (e *XAIExecutor) executeImages(ctx context.Context, auth *cliproxyauth.Auth
 	if err != nil {
 		return resp, err
 	}
-	applyXAIHeaders(httpReq, auth, token, false, "")
+	applyXAIHeaders(httpReq, auth, token, false, "", req.Model)
 	e.recordXAIRequest(ctx, auth, url, httpReq.Header.Clone(), req.Payload)
 
 	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
@@ -531,7 +541,7 @@ func (e *XAIExecutor) executeVideos(ctx context.Context, auth *cliproxyauth.Auth
 	if err != nil {
 		return resp, err
 	}
-	applyXAIHeaders(httpReq, auth, token, false, "")
+	applyXAIHeaders(httpReq, auth, token, false, "", req.Model)
 	if method == http.MethodPost {
 		key := xaiMetadataString(opts.Metadata, xaiIdempotencyKeyMetaKey)
 		if key == "" && opts.Headers != nil {
@@ -598,7 +608,7 @@ func (e *XAIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth
 	if err != nil {
 		return nil, err
 	}
-	applyXAIHeaders(httpReq, auth, token, true, prepared.sessionID)
+	applyXAIHeaders(httpReq, auth, token, true, prepared.sessionID, prepared.baseModel)
 	e.recordXAIRequest(ctx, auth, url, httpReq.Header.Clone(), prepared.body)
 
 	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
@@ -609,6 +619,7 @@ func (e *XAIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth
 		return nil, err
 	}
 	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+	e.recordXAIUsage(auth, prepared.baseModel, httpResp.Header, xaiusage.Usage{})
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		data, errRead := io.ReadAll(httpResp.Body)
 		if errClose := httpResp.Body.Close(); errClose != nil {
@@ -671,6 +682,7 @@ func (e *XAIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth
 					case "response.completed":
 						if detail, ok := helps.ParseCodexUsage(eventData); ok {
 							reporter.Publish(ctx, detail)
+							e.recordXAIUsage(auth, prepared.baseModel, nil, xaiusage.Usage{Input: detail.InputTokens, Output: detail.OutputTokens, Total: detail.InputTokens + detail.OutputTokens})
 						}
 						eventData = xaiPatchCompletedOutput(eventData, outputItemsByIndex, outputItemsFallback)
 						eventData = xaiNormalizeReasoningSummaryData(eventData)
@@ -915,7 +927,7 @@ func xaiCreds(auth *cliproxyauth.Auth) (token, baseURL string) {
 	return token, baseURL
 }
 
-func applyXAIHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, stream bool, sessionID string) {
+func applyXAIHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, stream bool, sessionID string, model string) {
 	r.Header.Set("Content-Type", "application/json")
 	if strings.TrimSpace(token) != "" {
 		r.Header.Set("Authorization", "Bearer "+token)
@@ -934,6 +946,24 @@ func applyXAIHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, str
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(r, attrs)
+	if xaiusage.IsFreeMetadata(authMetadata(auth)) {
+		r.Header.Set(xaiusage.ModelOverrideHeader, strings.TrimSpace(model))
+	}
+}
+
+func (e *XAIExecutor) recordXAIUsage(auth *cliproxyauth.Auth, model string, headers http.Header, observed xaiusage.Usage) {
+	if e == nil || e.cfg == nil || auth == nil || !xaiusage.IsFreeMetadata(auth.Metadata) {
+		return
+	}
+	store := xaiusage.SharedStore(e.cfg.AuthDir)
+	store.Record(auth.ID, xaiMetadataString(auth.Metadata, "email"), model, headers, observed)
+}
+
+func authMetadata(auth *cliproxyauth.Auth) map[string]any {
+	if auth == nil {
+		return nil
+	}
+	return auth.Metadata
 }
 
 func xaiResolveComposerSessionID(ctx context.Context, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, baseModel string) (string, error) {

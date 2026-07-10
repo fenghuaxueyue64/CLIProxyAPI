@@ -16,6 +16,7 @@ import (
 	internalcache "github.com/router-for-me/CLIProxyAPI/v7/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/translator"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/xaiusage"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
@@ -165,6 +166,126 @@ func TestXAIExecutorExecuteShapesResponsesRequest(t *testing.T) {
 	}
 }
 
+func TestXAIExecutorCompletionDoesNotOverwriteNewerQuotaHeaders(t *testing.T) {
+	authDir := t.TempDir()
+	slowHeadersSent := make(chan struct{})
+	releaseSlowBody := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, errRead := io.ReadAll(r.Body)
+		if errRead != nil {
+			t.Errorf("read body: %v", errRead)
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("X-Ratelimit-Limit-Requests", "21")
+		if bytes.Contains(body, []byte("slow")) {
+			w.Header().Set("X-Ratelimit-Remaining-Requests", "20")
+			w.WriteHeader(http.StatusOK)
+			w.(http.Flusher).Flush()
+			close(slowHeadersSent)
+			<-releaseSlowBody
+		} else {
+			w.Header().Set("X-Ratelimit-Remaining-Requests", "19")
+		}
+		_, _ = w.Write([]byte("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"object\":\"response\",\"status\":\"completed\",\"model\":\"grok-4.3\",\"output\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n"))
+	}))
+	defer server.Close()
+
+	exec := NewXAIExecutor(&config.Config{AuthDir: authDir})
+	auth := &cliproxyauth.Auth{
+		ID:         "xai-free.json",
+		Provider:   "xai",
+		Attributes: map[string]string{"base_url": server.URL, "api_key": "xai-token"},
+		Metadata:   map[string]any{"free_mode": true},
+	}
+	execute := func(content string) error {
+		_, err := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+			Model:   "grok-4.3",
+			Payload: []byte(`{"model":"grok-4.3","input":[{"role":"user","content":"` + content + `"}]}`),
+		}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse})
+		return err
+	}
+
+	slowDone := make(chan error, 1)
+	go func() {
+		slowDone <- execute("slow")
+	}()
+	<-slowHeadersSent
+
+	if err := execute("fast"); err != nil {
+		t.Fatalf("fast Execute() error = %v", err)
+	}
+	close(releaseSlowBody)
+	if err := <-slowDone; err != nil {
+		t.Fatalf("slow Execute() error = %v", err)
+	}
+
+	snapshot, ok := xaiusage.SharedStore(authDir).Get(auth.ID)
+	if !ok {
+		t.Fatal("usage snapshot missing")
+	}
+	if snapshot.Requests.Remaining != 19 {
+		t.Fatalf("remaining requests = %d, want newest value 19", snapshot.Requests.Remaining)
+	}
+}
+
+func TestXAIExecutorRecordsQuotaHeadersOnErrorResponses(t *testing.T) {
+	for _, mode := range []string{"compact", "stream"} {
+		t.Run(mode, func(t *testing.T) {
+			authDir := t.TempDir()
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.Header().Set("X-Ratelimit-Limit-Requests", "21")
+				w.Header().Set("X-Ratelimit-Remaining-Requests", "0")
+				w.Header().Set("X-Ratelimit-Limit-Tokens", "1000000")
+				w.Header().Set("X-Ratelimit-Remaining-Tokens", "0")
+				w.WriteHeader(http.StatusTooManyRequests)
+				_, _ = w.Write([]byte(`{"code":"subscription:free-usage-exhausted","error":"quota exhausted"}`))
+			}))
+			defer server.Close()
+
+			exec := NewXAIExecutor(&config.Config{AuthDir: authDir})
+			auth := &cliproxyauth.Auth{
+				ID:         "xai-free.json",
+				Provider:   "xai",
+				Attributes: map[string]string{"base_url": server.URL, "api_key": "xai-token"},
+				Metadata:   map[string]any{"free_mode": true},
+			}
+
+			var err error
+			if mode == "compact" {
+				_, err = exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+					Model:   "grok-4.3",
+					Payload: []byte(`{"model":"grok-4.3","input":[{"role":"user","content":"hello"}]}`),
+				}, cliproxyexecutor.Options{
+					SourceFormat: sdktranslator.FormatOpenAIResponse,
+					Alt:          "responses/compact",
+				})
+			} else {
+				_, err = exec.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+					Model:   "grok-4.3",
+					Payload: []byte(`{"model":"grok-4.3","input":[{"role":"user","content":"hello"}]}`),
+				}, cliproxyexecutor.Options{
+					SourceFormat: sdktranslator.FormatOpenAIResponse,
+					Stream:       true,
+				})
+			}
+			if err == nil {
+				t.Fatal("request error = nil, want quota error")
+			}
+
+			snapshot, ok := xaiusage.SharedStore(authDir).Get(auth.ID)
+			if !ok {
+				t.Fatal("usage snapshot missing for error response")
+			}
+			if snapshot.Requests.Remaining != 0 || snapshot.Tokens.Remaining != 0 {
+				t.Fatalf("quota snapshot = requests %#v tokens %#v, want zero remaining", snapshot.Requests, snapshot.Tokens)
+			}
+		})
+	}
+}
+
 func TestXAIExecutorComposerSessionIsolation(t *testing.T) {
 	exec := NewXAIExecutor(&config.Config{})
 	auth := &cliproxyauth.Auth{
@@ -217,7 +338,7 @@ func TestXAIExecutorComposerSessionIsolation(t *testing.T) {
 			if errRequest != nil {
 				t.Fatalf("NewRequest() error = %v", errRequest)
 			}
-			applyXAIHeaders(httpReq, auth, "xai-token", true, gotSession)
+			applyXAIHeaders(httpReq, auth, "xai-token", true, gotSession, "grok-4.5")
 			gotGrokConvID := httpReq.Header.Get("x-grok-conv-id")
 
 			if tt.wantGenerated {
@@ -261,6 +382,7 @@ func TestXAIExecutorComposerSessionIsolation(t *testing.T) {
 
 func TestXAIExecutorCompactUsesCompactEndpoint(t *testing.T) {
 	validEncryptedContent := testValidGrokEncryptedContent()
+	authDir := t.TempDir()
 	var gotPath string
 	var gotAuth string
 	var gotAccept string
@@ -276,16 +398,23 @@ func TestXAIExecutorCompactUsesCompactEndpoint(t *testing.T) {
 			t.Fatalf("read body: %v", errRead)
 		}
 		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("X-Ratelimit-Limit-Tokens", "1000")
+		w.Header().Set("X-Ratelimit-Remaining-Tokens", "997")
 		_, _ = w.Write([]byte(`{"id":"resp_1","object":"response.compaction","output":[{"type":"compaction","encrypted_content":"opaque-out"}],"usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}`))
 	}))
 	defer server.Close()
 
-	exec := NewXAIExecutor(&config.Config{})
+	exec := NewXAIExecutor(&config.Config{AuthDir: authDir})
 	auth := &cliproxyauth.Auth{
+		ID:       "xai-free.json",
 		Provider: "xai",
 		Attributes: map[string]string{
 			"base_url": server.URL,
 			"api_key":  "xai-token",
+		},
+		Metadata: map[string]any{
+			"free_mode": true,
+			"email":     "user@example.com",
 		},
 	}
 
@@ -319,6 +448,16 @@ func TestXAIExecutorCompactUsesCompactEndpoint(t *testing.T) {
 	}
 	if string(resp.Payload) != `{"id":"resp_1","object":"response.compaction","output":[{"type":"compaction","encrypted_content":"opaque-out"}],"usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}` {
 		t.Fatalf("payload = %s", string(resp.Payload))
+	}
+	snapshot, ok := xaiusage.SharedStore(authDir).Get(auth.ID)
+	if !ok {
+		t.Fatal("compact usage snapshot missing")
+	}
+	if snapshot.Observed != (xaiusage.Usage{Input: 1, Output: 2, Total: 3}) {
+		t.Fatalf("compact observed usage = %#v", snapshot.Observed)
+	}
+	if snapshot.ObservedRequests != 1 {
+		t.Fatalf("compact observed requests = %d, want 1", snapshot.ObservedRequests)
 	}
 }
 
@@ -1259,7 +1398,7 @@ func TestXAIExecutorComposerReusesClaudeCodeSession(t *testing.T) {
 	if errRequest != nil {
 		t.Fatalf("NewRequest() error = %v", errRequest)
 	}
-	applyXAIHeaders(httpReq, auth, "xai-token", true, first.sessionID)
+	applyXAIHeaders(httpReq, auth, "xai-token", true, first.sessionID, "grok-4.5")
 	if got := httpReq.Header.Get("x-grok-conv-id"); got != firstKey {
 		t.Fatalf("x-grok-conv-id = %q, want %q", got, firstKey)
 	}

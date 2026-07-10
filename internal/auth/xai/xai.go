@@ -11,6 +11,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/xaiusage"
+
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	log "github.com/sirupsen/logrus"
@@ -172,7 +174,6 @@ func (a *XAIAuth) ExchangeCodeForTokens(ctx context.Context, code, redirectURI s
 	return &AuthBundle{
 		TokenData:     *tokenData,
 		LastRefresh:   time.Now().UTC().Format(time.RFC3339),
-		BaseURL:       DefaultAPIBaseURL,
 		RedirectURI:   strings.TrimSpace(redirectURI),
 		TokenEndpoint: strings.TrimSpace(tokenEndpoint),
 	}, nil
@@ -275,7 +276,12 @@ func (a *XAIAuth) CreateTokenStorage(bundle *AuthBundle) *TokenStorage {
 	if bundle == nil {
 		return nil
 	}
-	return &TokenStorage{
+	baseURL := strings.TrimSpace(bundle.BaseURL)
+	freeMode := baseURL == ""
+	if freeMode {
+		baseURL = xaiusage.FreeBaseURL
+	}
+	storage := &TokenStorage{
 		Type:          "xai",
 		AccessToken:   bundle.TokenData.AccessToken,
 		RefreshToken:  bundle.TokenData.RefreshToken,
@@ -286,11 +292,19 @@ func (a *XAIAuth) CreateTokenStorage(bundle *AuthBundle) *TokenStorage {
 		LastRefresh:   bundle.LastRefresh,
 		Email:         strings.TrimSpace(bundle.TokenData.Email),
 		Subject:       bundle.TokenData.Subject,
-		BaseURL:       firstNonEmpty(bundle.BaseURL, DefaultAPIBaseURL),
+		BaseURL:       baseURL,
 		RedirectURI:   bundle.RedirectURI,
 		TokenEndpoint: bundle.TokenEndpoint,
 		AuthKind:      "oauth",
 	}
+	if freeMode {
+		storage.FreeMode = true
+		storage.Headers = map[string]string{
+			xaiusage.TokenAuthHeader:     xaiusage.TokenAuthValue,
+			xaiusage.ClientVersionHeader: xaiusage.DefaultClientVersion,
+		}
+	}
+	return storage
 }
 
 func parseJWTIdentity(token string) (email string, subject string) {

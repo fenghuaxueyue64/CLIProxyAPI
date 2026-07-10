@@ -113,6 +113,42 @@ func TestRefreshTokensPostsClientIDAndRefreshToken(t *testing.T) {
 	}
 }
 
+func TestExchangeCodeForTokensCreatesFreeModeStorage(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"access_token":  "access-token",
+			"refresh_token": "refresh-token",
+			"token_type":    "Bearer",
+			"expires_in":    3600,
+		})
+	}))
+	defer server.Close()
+
+	auth := NewXAIAuth(nil)
+	bundle, err := auth.ExchangeCodeForTokens(
+		context.Background(),
+		"authorization-code",
+		"http://127.0.0.1:56121/callback",
+		&PKCECodes{CodeVerifier: "verifier"},
+		server.URL,
+	)
+	if err != nil {
+		t.Fatalf("ExchangeCodeForTokens() error = %v", err)
+	}
+
+	storage := auth.CreateTokenStorage(bundle)
+	if !storage.FreeMode {
+		t.Fatal("FreeMode = false, want true for OAuth login")
+	}
+	if storage.BaseURL != "https://cli-chat-proxy.grok.com/v1" {
+		t.Fatalf("BaseURL = %q, want Grok Free URL", storage.BaseURL)
+	}
+	if storage.Headers["X-XAI-Token-Auth"] != "xai-grok-cli" {
+		t.Fatalf("token auth header = %q, want xai-grok-cli", storage.Headers["X-XAI-Token-Auth"])
+	}
+}
+
 func TestRefreshTokens_DeduplicatesConcurrentRefresh(t *testing.T) {
 	resetXAIRefreshGroupForTest()
 	t.Cleanup(resetXAIRefreshGroupForTest)

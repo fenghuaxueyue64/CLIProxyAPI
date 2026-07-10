@@ -35,6 +35,11 @@ remote-management:
 # Authentication directory (supports ~ for home directory)
 auth-dir: "~/.cli-proxy-api"
 
+# xAI OAuth logins use the Grok CLI Free endpoint by default and record per-account
+# request/token limits from real inference response headers. To keep a specific auth
+# file on a paid/custom xAI endpoint, set "free_mode": false and an explicit "base_url"
+# in that auth JSON file. Snapshots are available at GET /v0/management/xai-free-usage.
+
 # API keys for authentication
 api-keys:
   - "your-api-key-1"
